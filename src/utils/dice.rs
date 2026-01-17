@@ -41,10 +41,7 @@ pub fn parse_dice_expr(expr: &str, rules: &DnDRules) -> Result<DiceRoll, String>
     }
 
     if sides > rules.max_dice_sides {
-        return Err(format!(
-            "擲骰面數過多（最大 {}）",
-            rules.max_dice_sides
-        ));
+        return Err(format!("擲骰面數過多（最大 {}）", rules.max_dice_sides));
     }
 
     let modifier = captures

@@ -1,12 +1,13 @@
 use crate::models::types::{GlobalConfig, GuildConfig};
+use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
-use std::sync::Arc;
-use notify::{Watcher, RecursiveMode, recommended_watcher, EventKind};
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 #[derive(Debug, Error)]
@@ -25,6 +26,7 @@ pub struct ConfigManager {
     pub guilds: Arc<tokio::sync::RwLock<HashMap<u64, GuildConfig>>>,
     config_path: String,
     _watcher: Arc<std::sync::Mutex<Option<notify::RecommendedWatcher>>>,
+    reload_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     reload_tx: watch::Sender<()>,
 }
 
@@ -35,6 +37,7 @@ impl ConfigManager {
             guilds: Arc::new(RwLock::new(HashMap::new())),
             config_path: config_path.to_string(),
             _watcher: Arc::new(std::sync::Mutex::new(None)),
+            reload_task: Arc::new(std::sync::Mutex::new(None)),
             reload_tx: watch::channel(()).0,
         };
 
@@ -49,44 +52,57 @@ impl ConfigManager {
         let guilds = Arc::clone(&self.guilds);
         let reload_tx = self.reload_tx.clone();
 
-        // 建立文件監視器
         let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher = recommended_watcher(tx)?;
-        watcher.watch(Path::new(&config_path), RecursiveMode::NonRecursive)?;
+        if Path::new(&config_path).exists() {
+            watcher.watch(Path::new(&config_path), RecursiveMode::NonRecursive)?;
+        } else if let Some(parent) = Path::new(&config_path).parent() {
+            watcher.watch(parent, RecursiveMode::NonRecursive)?;
+        }
 
-        // 後臺線程監視文件變化
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         std::thread::spawn(move || {
             for res in rx {
-                match res {
-                    Ok(event) => {
-                        if matches!(event.kind, EventKind::Modify(_)) {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                            // 重新載入配置
-                            if let Ok(content) = std::fs::read_to_string(&config_path) {
-                                if let Ok(config_data) = serde_json::from_str::<ConfigData>(&content) {
-                                    // 全域
-                                    let mut global_write = futures::executor::block_on(global.write());
-                                    *global_write = config_data.global.unwrap_or_default();
-                                    
-                                    // 群組
-                                    let mut guilds_write = futures::executor::block_on(guilds.write());
-                                    *guilds_write = config_data.guilds.unwrap_or_default();
-                                    
-                                    // 發送重載通知
-                                    let _ = reload_tx.send(());
-                                    log::info!("配置文件已重新加載: {}", config_path);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => log::error!("配置監視器錯誤: {:?}", e),
+                if let Ok(event) = res {
+                    let _ = event_tx.send(event);
                 }
             }
         });
 
-        // 保存watcher
+        let task_config_path = config_path.clone();
+        let reload_task = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                let path_matches = event
+                    .paths
+                    .iter()
+                    .any(|path| path == Path::new(&task_config_path));
+                if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) && path_matches
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    match tokio::fs::read_to_string(&task_config_path).await {
+                        Ok(content) => match serde_json::from_str::<ConfigData>(&content) {
+                            Ok(config_data) => {
+                                *global.write().await = config_data.global.unwrap_or_default();
+                                *guilds.write().await = config_data.guilds.unwrap_or_default();
+                                let _ = reload_tx.send(());
+                                log::info!("配置文件已重新加載: {}", task_config_path);
+                            }
+                            Err(e) => {
+                                log::error!("配置文件解析失敗: {:?}", e);
+                            }
+                        },
+                        Err(e) => {
+                            log::error!("讀取配置文件失敗: {:?}", e);
+                        }
+                    }
+                }
+            }
+        });
+
         let mut watcher_guard = self._watcher.lock().unwrap();
         *watcher_guard = Some(watcher);
+        let mut task_guard = self.reload_task.lock().unwrap();
+        *task_guard = Some(reload_task);
 
         Ok(())
     }
@@ -108,13 +124,15 @@ impl ConfigManager {
                         } else {
                             old_api_config.api_url.clone()
                         };
-                        
+
                         // 設定名稱
                         let mut new_api_config = old_api_config;
                         new_api_config.name = name.clone();
-                        
+
                         // 初始化api_configs映射並添加配置
-                        guild_config.api_configs.insert(name.clone(), new_api_config);
+                        guild_config
+                            .api_configs
+                            .insert(name.clone(), new_api_config);
                         // 將此配置設為活動配置
                         guild_config.active_api = Some(name);
                     }
@@ -133,7 +151,7 @@ impl ConfigManager {
     pub async fn save_config(&self) -> Result<(), ConfigError> {
         let global_read = self.global.read().await;
         let guilds_read = self.guilds.read().await;
-        
+
         let config_data = ConfigData {
             global: Some(global_read.clone()),
             guilds: Some(guilds_read.clone()),
@@ -161,35 +179,36 @@ impl ConfigManager {
         self.save_config().await
     }
 
-    pub async fn get_guild_api_config(&self, guild_id: u64) -> crate::utils::api::ApiConfig {
+    pub async fn get_guild_api_config(&self, guild_id: u64) -> crate::ai::providers::ApiConfig {
         let guilds_read = self.guilds.read().await;
         if let Some(guild_config) = guilds_read.get(&guild_id) {
             if let Some(ref active_api_name) = guild_config.active_api {
-                // 嘗試獲取活動的API配置
                 if let Some(api_config) = guild_config.api_configs.get(active_api_name) {
                     api_config.clone()
                 } else {
-                    // 如果活動的API配置不存在，返回默認配置
-                    crate::utils::api::ApiConfig::default()
+                    crate::ai::providers::ApiConfig::default()
                 }
             } else {
-                // 如果沒有設置活動API，返回默認配置
-                crate::utils::api::ApiConfig::default()
+                crate::ai::providers::ApiConfig::default()
             }
         } else {
-            crate::utils::api::ApiConfig::default()
+            crate::ai::providers::ApiConfig::default()
         }
     }
 
     pub async fn add_guild_api_config(
         &self,
         guild_id: u64,
-        api_config: crate::utils::api::ApiConfig,
+        api_config: crate::ai::providers::ApiConfig,
     ) -> Result<(), ConfigError> {
         let mut guilds_write = self.guilds.write().await;
-        let guild_config = guilds_write.entry(guild_id).or_insert_with(GuildConfig::default);
+        let guild_config = guilds_write
+            .entry(guild_id)
+            .or_insert_with(GuildConfig::default);
         let config_name = api_config.name.clone();
-        guild_config.api_configs.insert(config_name.clone(), api_config);
+        guild_config
+            .api_configs
+            .insert(config_name.clone(), api_config);
         // 如果這是第一個配置，設為活動配置
         if guild_config.active_api.is_none() {
             guild_config.active_api = Some(config_name);
@@ -198,7 +217,10 @@ impl ConfigManager {
         self.save_config().await
     }
 
-    pub async fn get_guild_api_configs(&self, guild_id: u64) -> std::collections::HashMap<String, crate::utils::api::ApiConfig> {
+    pub async fn get_guild_api_configs(
+        &self,
+        guild_id: u64,
+    ) -> std::collections::HashMap<String, crate::ai::providers::ApiConfig> {
         let guilds_read = self.guilds.read().await;
         if let Some(guild_config) = guilds_read.get(&guild_id) {
             guild_config.api_configs.clone()
@@ -207,7 +229,11 @@ impl ConfigManager {
         }
     }
 
-    pub async fn remove_guild_api_config(&self, guild_id: u64, name: &str) -> Result<bool, ConfigError> {
+    pub async fn remove_guild_api_config(
+        &self,
+        guild_id: u64,
+        name: &str,
+    ) -> Result<bool, ConfigError> {
         let mut guilds_write = self.guilds.write().await;
         let mut removed = false;
         if let Some(guild_config) = guilds_write.get_mut(&guild_id) {
@@ -248,28 +274,6 @@ impl ConfigManager {
             self.save_config().await?;
         }
         Ok(success)
-    }
-
-    pub async fn get_memory_enabled_for_user(&self, user_id: &str, guild_id: &str) -> bool {
-        let guilds_read = self.guilds.read().await;
-        if let Some(guild_config) = guilds_read.get(&guild_id.parse().unwrap_or(0)) {
-            // 檢查特定用戶的記憶功能是否啟用
-            if let Some(enabled) = guild_config.memory_enabled_users.get(user_id) {
-                *enabled
-            } else {
-                // 如果用戶沒有特定設置，默認為啟用
-                true
-            }
-        } else {
-            // 如果群組配置不存在，默認為啟用
-            true
-        }
-    }
-
-    pub async fn set_memory_enabled_for_user(&self, user_id: &str, guild_id: &str, enabled: bool) {
-        let mut guilds_write = self.guilds.write().await;
-        let guild_config = guilds_write.entry(guild_id.parse().unwrap_or(0)).or_insert_with(GuildConfig::default);
-        guild_config.memory_enabled_users.insert(user_id.to_string(), enabled);
     }
 
     pub async fn is_developer(&self, user_id: u64) -> bool {
@@ -324,7 +328,9 @@ mod tests {
     #[tokio::test]
     async fn test_config_manager_creation() {
         let path = "test_config.json";
-        let config = ConfigManager::new(path).await.expect("Failed to create ConfigManager in test");
+        let config = ConfigManager::new(path)
+            .await
+            .expect("Failed to create ConfigManager in test");
         let global = config.get_global_config().await;
         assert!(!global.restart_mode.is_empty());
         let _ = std::fs::remove_file(path);

@@ -3,9 +3,9 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-一個功能完整的 TRPG Discord 機器人，使用 Rust 編寫。支援 D&D/CoC 擲骰、AI 對話、RAG 記憶系統和技能管理。
+一個功能完整的 TRPG Discord 機器人，使用 Rust 編寫。支援 D&D/CoC 擲骰、AI 對話和技能管理。
 
-**專案規模**：8.4k 行代碼 · 27 個模組 · 16+ 指令
+**專案規模**：8.4k 行代碼 · 26 個模組 · 14+ 指令
 
 ## 功能特色
 
@@ -15,12 +15,11 @@
 - **CoC 7e**：技能判定（大成功、極難、困難、普通、失敗、大失敗）
 - **技能管理**：個人技能數據庫，支援模糊搜尋
 
-### 🧠 AI 對話與記憶
+### 🧠 AI 對話
 
 - **多 LLM 支援**：OpenAI、Anthropic、Google 等
-- **RAG 記憶系統**：向量語義搜尋（837 行實現）
 - **自定義提示詞**：完全可配置的 AI 角色
-- **智能上下文**：可調整記憶檢索（3-20 條）、歷史範圍（5-50 條）、Token 預算（50%-90%）
+- **上下文預算**：可調整 Token 預算（50%-90%）
 
 ### 📚 數據管理
 
@@ -31,7 +30,7 @@
 ### 📝 其他功能
 
 - 智能日誌系統、大成功/失敗追蹤
-- 對話總結、效果查詢
+- 效果查詢
 - 配置管理、熱重載
 
 ## 快速開始
@@ -74,7 +73,6 @@ GOOGLE_API_KEY=your_key                 # 可選
 | --------- | --------- | ----------------------------------- |
 | `/dice`   | 擲骰系統  | `/dice roll 1d20+5`                 |
 | `/skill`  | 技能管理  | `/skill show 劍術`                  |
-| `/memory` | 記憶系統  | `/memory action:save content:"..."` |
 | `/prompt` | AI 提示詞 | `/prompt set prompt:"..."`          |
 | `/chat`   | API 配置  | `/chat add name:openai ...`         |
 
@@ -93,21 +91,12 @@ GOOGLE_API_KEY=your_key                 # 可選
 - `/skill show <名稱>` - 搜尋技能
 - `/skill delete <名稱>` - 刪除技能
 
-##### 記憶系統
-
-- `/memory action:save content:"..." [tags:"..."]` - 保存記憶
-- `/memory action:search content:"..." [max_results:5]` - 搜尋記憶
-- `/memory action:list [page:1]` - 列出記憶
-- `/memory action:delete id:<ID>` - 刪除記憶
-- `/memory action:toggle enabled:<true/false>` - 開關記憶
-- `/memory action:vector method:<api/local>` - 設定向量計算
-
 ##### AI 提示詞
 
 - `/prompt set prompt:"..."` - 設置自定義提示詞
 - `/prompt reset` - 重置為預設
 - `/prompt view` - 查看當前提示詞
-- `/prompt context [ratio] [max_memory] [max_history]` - 配置上下文
+- `/prompt context [ratio]` - 配置上下文
 
 ##### API 管理
 
@@ -124,7 +113,6 @@ GOOGLE_API_KEY=your_key                 # 可選
 - `/crit kind:<success/fail>` - 設定大成功/失敗頻道
 - `/admin` - 管理功能
 - `/help` - 幫助
-- `/summarize [limit]` - 總結對話
 
 ## 配置範例
 
@@ -145,7 +133,7 @@ GOOGLE_API_KEY=your_key                 # 可選
 /prompt set prompt:"你是一位經驗豐富的 D&D GM，擅長營造氛圍..."
 
 # 調整上下文
-/prompt context ratio:0.8 max_memory:15 max_history:40
+/prompt context ratio:0.8
 ```
 
 ### config.json 結構
@@ -156,9 +144,7 @@ GOOGLE_API_KEY=your_key                 # 可選
     "YOUR_GUILD_ID": {
       "custom_system_prompt": "你是...",
       "context_config": {
-        "token_budget_ratio": 0.75,
-        "max_memory_results": 10,
-        "max_history_messages": 30
+        "token_budget_ratio": 0.75
       },
       "dnd_rules": {
         "critical_success": 20,
@@ -170,43 +156,20 @@ GOOGLE_API_KEY=your_key                 # 可選
 }
 ```
 
-## 記憶系統與 RAG
-
-### 工作原理
+## 對話上下文
 
 ```txt
-用戶提問 → 向量搜尋相關記憶 → 載入對話歷史 → 構建上下文 → AI 回應
+系統提示詞 → 當前訊息 → AI 回應
 ```
-
-### 向量計算方式
-
-1. **Local**：本地 384 維向量，保護隱私
-2. **API**：使用外部 API，更高精度
-
-### 上下文構建
-
-```txt
-1. 系統提示詞（可自定義）
-2. 記憶（3-20 條，向量相似度）
-3. 歷史（5-50 條，時間排序）
-4. 當前訊息
-```
-
-### TRPG 應用
-
-- 角色關係追蹤
-- 劇情連貫性維持
-- 世界觀設定管理
-- 任務進度記錄
-
 ## 架構與開發
 
 ### 專案結構
 
 ```bash
 src/
-├── bot/commands/      # 指令層 (12 模組)
-├── utils/             # 核心邏輯 (8 模組)
+├── ai/                # AI 模組 (providers/prompt/service/commands)
+├── bot/commands/      # 指令層 (8 模組)
+├── utils/             # 核心邏輯 (6 模組)
 └── models/            # 數據模型
 ```
 
@@ -214,11 +177,11 @@ src/
 
 | 模組            | 行數  | 功能               |
 | --------------- | ----- | ------------------ |
-| memory.rs       | 837   | 記憶管理與向量搜尋 |
-| skills.rs       | 732   | 技能管理系統       |
-| api.rs          | 661   | API 管理與調用     |
-| conversation.rs | 531   | 對話上下文構建     |
-| import.rs       | 1,043 | 數據導入核心       |
+| ai/providers.rs | 661   | API 管理與調用     |
+| ai/prompt.rs    | 531   | 對話上下文構建     |
+| ai/service.rs   | 200   | LLM 對話流程封裝   |
+| utils/import.rs | 1,043 | 數據導入核心       |
+| utils/skills.rs | 732   | 技能管理系統       |
 
 ### 技術棧
 
@@ -249,15 +212,13 @@ cargo fmt --check
 #### 新功能
 
 - ✨ 自定義系統提示詞（193 行新模組）
-- ✨ 上下文配置管理（Token 預算、記憶/歷史範圍可調）
-- ✨ `/prompt` 指令（4 個子指令）
+- ✨ 上下文配置管理（Token 預算可調）
+- ✨ `/prompt` 指令（3 個子指令）
 - 🐛 資料庫權限修復（自動檢查與創建）
 
 #### 改進
 
 - 🔧 修正 ConfigManager 死鎖問題
-- 🔧 修正 `created_at` 欄位類型兼容
-- 📝 記憶指令重構（使用 action 枚舉）
 - 📊 詳細日誌輸出
 
 #### 技術

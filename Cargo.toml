@@ -45,12 +45,6 @@ uuid = { version = "1.0", features = ["v4"] }
 # 日期時間處理
 chrono = { version = "0.4", features = ["serde"] }
 
-# 數學計算庫（用於計算向量相似度）
-ndarray = "0.15"
-
-# 序列化庫（用於安全的向量序列化/反序列化）
-bincode = "1.3"
-base64 = "0.22"
 
 # SQLite 相關
 rusqlite = { version = "0.32", features = ["bundled"] }

@@ -1,8 +1,9 @@
-use crate::utils::config::ConfigManager;
 use log;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::sync::Arc;
+
+use crate::utils::config::ConfigManager;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiConfig {
@@ -12,25 +13,20 @@ pub struct ApiConfig {
     pub api_key: Option<String>,
     pub model: String,
     pub enabled: bool,
-    pub provider: ApiProvider, // New field to identify API provider
+    pub provider: ApiProvider,
 }
 
 fn default_api_name() -> String {
     "default".to_string()
 }
 
-// Helper function to get API key from environment variables based on provider
-// These keys work with OpenAI-compatible APIs like OpenRouter, OpenAI, etc.
 pub fn get_api_key_from_env(provider: &ApiProvider) -> Option<String> {
     match provider {
         ApiProvider::OpenAI => env::var("OPENAI_API_KEY").ok(),
         ApiProvider::OpenRouter => env::var("OPENROUTER_API_KEY").ok(),
-        ApiProvider::Anthropic => env::var("ANTHROPIC_API_KEY").ok(), // For Anthropic via OpenAI-compatible endpoints
-        ApiProvider::Google => env::var("GOOGLE_API_KEY").ok(), // For Google via OpenAI-compatible endpoints
-        ApiProvider::Custom => {
-            // For custom OpenAI-compatible APIs
-            env::var("CUSTOM_API_KEY").ok()
-        }
+        ApiProvider::Anthropic => env::var("ANTHROPIC_API_KEY").ok(),
+        ApiProvider::Google => env::var("GOOGLE_API_KEY").ok(),
+        ApiProvider::Custom => env::var("CUSTOM_API_KEY").ok(),
     }
 }
 
@@ -58,7 +54,6 @@ impl Default for ApiConfig {
 
 #[derive(Debug)]
 pub struct ApiManager {
-    // 使用配置管理器而不是自己的HashMap
     pub config_manager: Arc<tokio::sync::Mutex<ConfigManager>>,
 }
 
@@ -144,7 +139,7 @@ pub async fn call_llm_api(
     api_url: &str,
     api_key: Option<&str>,
     request: &ChatCompletionRequest,
-    provider: &ApiProvider, // New parameter
+    provider: &ApiProvider,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     log::info!(
         "API 請求: URL={}, Model={}, Provider={:?}",
@@ -154,26 +149,20 @@ pub async fn call_llm_api(
     );
 
     let client = reqwest::Client::new();
-
-    // 構建請求 URL 根據不同提供商
     let (final_url, additional_headers) = build_request_params(api_url, provider);
 
     log::info!("最終 API 請求 URL: {}", final_url);
 
     let mut builder = client.post(&final_url);
-
-    // 添加必要的 headers
     for (key, value) in additional_headers {
         builder = builder.header(key, value);
     }
 
-    // 添加認證 header
     if let Some(key) = api_key {
         builder = builder.header("Authorization", format!("Bearer {}", key));
     }
 
     builder = builder.header("Content-Type", "application/json");
-
     log::debug!("API 請求內容: {:?}", request);
 
     let response = builder.json(request).send().await?;
@@ -193,17 +182,14 @@ pub async fn call_llm_api(
         return Err(format!("API request failed with status {}: {}", status, error_text).into());
     }
 
-    // 盡可能解析響應，如果解析失敗，記錄詳細錯誤信息
     let response_text = response.text().await?;
     log::debug!("原始響應: {}", response_text);
 
-    // 如果響應看起來像 HTML，則返回錯誤
     if response_text.starts_with("<!DOCTYPE html") || response_text.contains("<html") {
         log::error!("收到 HTML 響應而不是 JSON，API 端點 URL 可能不正確");
         return Err("收到 HTML 響應而不是 JSON，API 端點 URL 可能不正確".into());
     }
 
-    // 嘗試解析 JSON 響應
     let json_value: serde_json::Value = match serde_json::from_str(&response_text) {
         Ok(val) => val,
         Err(e) => {
@@ -212,14 +198,11 @@ pub async fn call_llm_api(
         }
     };
 
-    // 嘗試解析為預期的響應結構
     let completion_response: ChatCompletionResponse =
         match serde_json::from_value(json_value.clone()) {
             Ok(val) => val,
             Err(e) => {
                 log::warn!("標準響應格式解析失敗: {}，嘗試通用解析", e);
-
-                // 解析通用響應格式
                 if let Some(choices_array) = json_value["choices"].as_array() {
                     if let Some(first_choice) = choices_array.first() {
                         if let Some(message_obj) = first_choice["message"].as_object() {
@@ -245,7 +228,6 @@ pub async fn call_llm_api(
     }
 }
 
-// Helper function to build request parameters based on API provider
 fn build_request_params(
     api_url: &str,
     provider: &ApiProvider,
@@ -263,13 +245,11 @@ fn build_request_params(
             let final_url = if api_url.ends_with("/v1") && !api_url.contains("chat/completions") {
                 format!("{}/chat/completions", api_url)
             } else if api_url == "https://api.openai.com/v1/chat/completions" {
-                // Default to OpenRouter if using OpenAI default but configured as OpenRouter
                 "https://openrouter.ai/api/v1/chat/completions".to_string()
             } else {
                 api_url.to_string()
             };
 
-            // Add optional attribution headers for OpenRouter
             let headers = vec![
                 (
                     "HTTP-Referer",
@@ -280,31 +260,19 @@ fn build_request_params(
 
             (final_url, headers)
         }
-        ApiProvider::Anthropic => {
-            // Anthropic uses different format, but this function is for OpenAI-compatible APIs
-            // So we return the original API URL with placeholder headers
-            // Note: For full Anthropic support, we'd need a different implementation
-            (api_url.to_string(), vec![])
-        }
-        ApiProvider::Google => {
-            // Google also has different structure
-            (api_url.to_string(), vec![])
-        }
-        ApiProvider::Custom => {
-            // Custom endpoint with no specific modifications
-            (api_url.to_string(), vec![])
-        }
+        ApiProvider::Anthropic => (api_url.to_string(), vec![]),
+        ApiProvider::Google => (api_url.to_string(), vec![]),
+        ApiProvider::Custom => (api_url.to_string(), vec![]),
     }
 }
 
-// Helper function to get a default model based on provider
 pub fn get_default_model_for_provider(provider: &ApiProvider) -> String {
     match provider {
-        ApiProvider::OpenRouter => "google/gemma-2-9b-it".to_string(), // Free OpenRouter model
-        ApiProvider::OpenAI => "gpt-3.5-turbo".to_string(),            // Standard OpenAI model
-        ApiProvider::Anthropic => "claude-3-haiku-20240307".to_string(), // Anthropic free model
-        ApiProvider::Google => "google/gemini-pro".to_string(),        // Google model
-        ApiProvider::Custom => "gpt-3.5-turbo".to_string(),            // Default fallback
+        ApiProvider::OpenRouter => "google/gemma-2-9b-it".to_string(),
+        ApiProvider::OpenAI => "gpt-3.5-turbo".to_string(),
+        ApiProvider::Anthropic => "claude-3-haiku-20240307".to_string(),
+        ApiProvider::Google => "google/gemini-pro".to_string(),
+        ApiProvider::Custom => "gpt-3.5-turbo".to_string(),
     }
 }
 
@@ -316,15 +284,11 @@ pub async fn get_models_list(
     log::info!("獲取模型列表: URL={}, Provider={:?}", api_url, provider);
 
     let client = reqwest::Client::new();
-
-    // 構建模型列表 URL 根據不同提供商
     let (final_url, additional_headers) = build_models_list_params(api_url, provider);
 
     log::info!("最終模型列表 URL: {}", final_url);
 
     let mut builder = client.get(&final_url);
-
-    // 添加必要的 headers
     for (key, value) in additional_headers {
         builder = builder.header(key, value);
     }
@@ -346,7 +310,6 @@ pub async fn get_models_list(
             status,
             error_text
         );
-        // 如果標準模型端點失敗，返回一個錯誤，讓前端處理其他方式
         return Err(format!(
             "Failed to fetch models list: status {}, response: {}",
             status, error_text
@@ -357,7 +320,6 @@ pub async fn get_models_list(
     let response_text = response.text().await?;
     log::debug!("模型列表原始響應: {}", response_text);
 
-    // 如果響應看起來像 HTML，則返回錯誤
     if response_text.starts_with("<!DOCTYPE html") || response_text.contains("<html") {
         log::error!("獲取模型列表時收到 HTML 響應而不是 JSON，API 端點 URL 可能不正確");
         return Err("收到 HTML 響應而不是 JSON，API 端點 URL 可能不正確".into());
@@ -371,7 +333,6 @@ pub async fn get_models_list(
         }
     };
 
-    // 解析回應以獲取模型列表
     let mut models_list = Vec::new();
     if let Some(data) = json["data"].as_array() {
         for item in data {
@@ -380,19 +341,15 @@ pub async fn get_models_list(
                 models_list.push(model_id.to_string());
             }
         }
-    } else {
-        // 某些服務可能有不同的響應結構，嘗試其他格式
-        if let Some(array) = json.as_array() {
-            // 如果響應是簡單的陣列，包含模型ID
-            for item in array {
-                if let Some(model_id) = item
-                    .get("id")
-                    .or_else(|| item.get("model"))
-                    .and_then(|v| v.as_str())
-                {
-                    log::debug!("找到模型 (陣列格式): {}", model_id);
-                    models_list.push(model_id.to_string());
-                }
+    } else if let Some(array) = json.as_array() {
+        for item in array {
+            if let Some(model_id) = item
+                .get("id")
+                .or_else(|| item.get("model"))
+                .and_then(|v| v.as_str())
+            {
+                log::debug!("找到模型 (陣列格式): {}", model_id);
+                models_list.push(model_id.to_string());
             }
         }
     }
@@ -401,7 +358,6 @@ pub async fn get_models_list(
     Ok(models_list)
 }
 
-// Helper function to build models list parameters based on API provider
 fn build_models_list_params(
     api_url: &str,
     provider: &ApiProvider,
@@ -432,7 +388,6 @@ fn build_models_list_params(
                     .unwrap_or_else(|| format!("{}/models", api_url))
             };
 
-            // Add optional attribution headers for OpenRouter
             let headers = vec![
                 (
                     "HTTP-Referer",
@@ -443,183 +398,10 @@ fn build_models_list_params(
 
             (final_url, headers)
         }
-        ApiProvider::Anthropic => {
-            // Anthropic doesn't have a standard models endpoint like OpenAI
-            // Return the original URL with no modifications
-            (api_url.to_string(), vec![])
-        }
-        ApiProvider::Google => {
-            // Google also has different structure
-            (api_url.to_string(), vec![])
-        }
-        ApiProvider::Custom => {
-            // Custom endpoint with no specific modifications
-            (api_url.to_string(), vec![])
-        }
+        ApiProvider::Anthropic => (api_url.to_string(), vec![]),
+        ApiProvider::Google => (api_url.to_string(), vec![]),
+        ApiProvider::Custom => (api_url.to_string(), vec![]),
     }
-}
-
-// ========== Embedding API 支援 ==========
-
-/// Embedding API 請求
-#[derive(Debug, Serialize, Deserialize)]
-pub struct EmbeddingRequest {
-    pub model: String,
-    pub input: Vec<String>, // 支援批次處理
-}
-
-/// Embedding API 回應
-#[derive(Debug, Serialize, Deserialize)]
-pub struct EmbeddingResponse {
-    pub data: Vec<EmbeddingData>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct EmbeddingData {
-    pub embedding: Vec<f32>,
-    pub index: usize,
-}
-
-/// Embedding 快取
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-
-fn get_embedding_cache() -> &'static Mutex<HashMap<String, Vec<f32>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Vec<f32>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// 調用 Embedding API (支援 OpenAI, Voyage, Cohere 等)
-#[allow(dead_code)]
-pub async fn call_embedding_api(
-    api_url: &str,
-    api_key: Option<&str>,
-    texts: &[String],
-    model: &str,
-    provider: &ApiProvider,
-    use_cache: bool,
-) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error + Send + Sync>> {
-    log::info!(
-        "Embedding API 請求: texts={}, model={}, provider={:?}",
-        texts.len(),
-        model,
-        provider
-    );
-
-    let mut results = Vec::new();
-    let mut texts_to_embed = Vec::new();
-    let mut cache_indices = Vec::new();
-
-    // 檢查快取
-    if use_cache {
-        let cache = get_embedding_cache().lock().unwrap();
-        for (i, text) in texts.iter().enumerate() {
-            let cache_key = format!("{}:{}:{}", provider_to_string(provider), model, text);
-            if let Some(cached) = cache.get(&cache_key) {
-                results.push((i, cached.clone()));
-            } else {
-                texts_to_embed.push(text.clone());
-                cache_indices.push(i);
-            }
-        }
-    } else {
-        texts_to_embed = texts.to_vec();
-        cache_indices = (0..texts.len()).collect();
-    }
-
-    // 如果全部命中快取
-    if texts_to_embed.is_empty() {
-        results.sort_by_key(|(i, _)| *i);
-        return Ok(results.into_iter().map(|(_, v)| v).collect());
-    }
-
-    // 構建 API URL
-    let embedding_url = match provider {
-        ApiProvider::OpenAI => {
-            // OpenAI: https://api.openai.com/v1/embeddings
-            api_url.replace("/chat/completions", "/embeddings")
-        }
-        ApiProvider::OpenRouter => {
-            // OpenRouter 也支援 /embeddings
-            api_url.replace("/chat/completions", "/embeddings")
-        }
-        _ => {
-            // 其他供應商使用相同模式
-            api_url.replace("/chat/completions", "/embeddings")
-        }
-    };
-
-    let client = reqwest::Client::new();
-    let mut builder = client.post(&embedding_url);
-
-    // 添加認證
-    if let Some(key) = api_key {
-        builder = builder.header("Authorization", format!("Bearer {}", key));
-    }
-
-    // 構建請求
-    let request = EmbeddingRequest {
-        model: model.to_string(),
-        input: texts_to_embed.clone(),
-    };
-
-    builder = builder.json(&request);
-
-    // 發送請求
-    let response = builder.send().await?;
-    let status = response.status();
-    let response_text = response.text().await?;
-
-    if !status.is_success() {
-        return Err(format!("Embedding API 錯誤 {}: {}", status, response_text).into());
-    }
-
-    // 解析回應
-    let embedding_response: EmbeddingResponse = serde_json::from_str(&response_text)?;
-
-    // 處理結果並更新快取
-    if use_cache {
-        let mut cache = get_embedding_cache().lock().unwrap();
-        for (i, data) in embedding_response.data.iter().enumerate() {
-            let original_idx = cache_indices[i];
-            let text = &texts[original_idx];
-            let cache_key = format!("{}:{}:{}", provider_to_string(provider), model, text);
-            cache.insert(cache_key, data.embedding.clone());
-            results.push((original_idx, data.embedding.clone()));
-        }
-    } else {
-        for (i, data) in embedding_response.data.into_iter().enumerate() {
-            let original_idx = cache_indices[i];
-            results.push((original_idx, data.embedding));
-        }
-    }
-
-    // 排序並返回
-    results.sort_by_key(|(i, _)| *i);
-    Ok(results.into_iter().map(|(_, v)| v).collect())
-}
-
-fn provider_to_string(provider: &ApiProvider) -> &'static str {
-    match provider {
-        ApiProvider::OpenAI => "openai",
-        ApiProvider::OpenRouter => "openrouter",
-        ApiProvider::Anthropic => "anthropic",
-        ApiProvider::Google => "google",
-        ApiProvider::Custom => "custom",
-    }
-}
-
-/// 清除 embedding 快取
-#[allow(dead_code)]
-pub fn clear_embedding_cache() {
-    get_embedding_cache().lock().unwrap().clear();
-    log::info!("Embedding 快取已清除");
-}
-
-/// 獲取快取大小
-#[allow(dead_code)]
-pub fn get_embedding_cache_size() -> usize {
-    get_embedding_cache().lock().unwrap().len()
 }
 
 #[cfg(test)]
@@ -629,14 +411,16 @@ mod tests {
     #[tokio::test]
     async fn test_api_manager_creation() {
         use crate::utils::config::ConfigManager;
+        let config_path = format!("/tmp/trpg_test_config_{}.json", std::process::id());
+        std::fs::write(&config_path, "{}").unwrap();
         let config_manager = Arc::new(tokio::sync::Mutex::new(
-            ConfigManager::new("test_config.json").await.unwrap(),
+            ConfigManager::new(&config_path).await.unwrap(),
         ));
         let _api_manager = ApiManager::new(config_manager);
-        // 測試默認配置是否正確
         let config = ApiConfig::default();
         assert_eq!(config.model, "gpt-3.5-turbo");
         assert_eq!(config.provider, ApiProvider::OpenAI);
+        let _ = std::fs::remove_file(&config_path);
     }
 
     #[test]
@@ -656,6 +440,6 @@ mod tests {
             &ApiProvider::OpenRouter,
         );
         assert_eq!(url, "https://openrouter.ai/api/v1/chat/completions");
-        assert!(!headers.is_empty()); // Should have attribution headers
+        assert!(!headers.is_empty());
     }
 }

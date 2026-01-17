@@ -7,7 +7,7 @@ pub type Context<'a> = poise::Context<'a, data::BotData, Error>;
 pub fn commands() -> Vec<poise::Command<data::BotData, Error>> {
     vec![
         commands::base_settings_search::base_settings_search(), // 使用了 name = "bs-search" 屬性
-        commands::chat::chat(),
+        crate::ai::commands::chat::chat(),
         commands::dice::dice(),
         commands::effect::effect(),
         commands::logs::crit(),
@@ -15,8 +15,6 @@ pub fn commands() -> Vec<poise::Command<data::BotData, Error>> {
         commands::admin::admin(),
         commands::help::help(),
         commands::import::import_data(),
-        commands::memory::memory(),
-        commands::prompt::prompt(),
-        commands::summarize::summarize(),
+        crate::ai::commands::prompt::prompt(),
     ]
 }

@@ -16,9 +16,9 @@ struct EffectRecord {
 pub async fn effect(
     ctx: Context<'_>,
     #[description = "異常狀態名稱或關鍵字"] keyword: String,
-    #[description = "最多顯示幾筆結果，預設為 5"] 
-    #[min = 1] 
-    #[max = 20] 
+    #[description = "最多顯示幾筆結果，預設為 5"]
+    #[min = 1]
+    #[max = 20]
     limit: Option<u8>,
 ) -> Result<(), Error> {
     let keyword = keyword.trim();
@@ -75,7 +75,6 @@ pub async fn effect(
     Ok(())
 }
 
-
 async fn fetch_effects_from_base(
     ctx: Context<'_>,
     keyword: &str,
@@ -97,7 +96,7 @@ async fn fetch_effects_from_base(
                     ELSE 4 \
                 END, \
                 ABS(LENGTH(name) - LENGTH(?2)) ASC, name \
-                LIMIT ?3"
+                LIMIT ?3",
             )?;
 
             let rows = stmt.query_map(params![keyword_pattern, keyword_lower, limit], |row| {
