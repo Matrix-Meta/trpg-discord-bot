@@ -36,8 +36,11 @@ futures = "0.3"
 csv = "1.4"
 calamine = "0.31"   # 讀 Excel，配合 2024 edition 沒問題
 
-# HTTP 用 rustls，避免 Linux 上 OpenSSL 依賴雜訊；也打開常見解壓功能
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json", "gzip", "brotli", "deflate", "zstd"] }
+# HTTP 用 native-tls 以支援自簽憑證環境變數
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "http2", "json", "gzip", "brotli", "deflate", "zstd"] }
+
+# 顯式指定 serenity 使用 native-tls
+serenity = { version = "0.12", default-features = false, features = ["native_tls_backend", "client", "gateway", "rustls_backend"] }
 
 # UUID 生成
 uuid = { version = "1.0", features = ["v4"] }
