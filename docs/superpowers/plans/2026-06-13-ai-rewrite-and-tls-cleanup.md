@@ -40,6 +40,8 @@
 
 ## Task 1: Part A — 機械清理（憑證 / TLS / rusqlite）
 
+> **執行後修訂**：原計畫假設「移除 serenity 的 `rustls_backend` feature」即可收斂 TLS，實測無效——重複依賴（rustls / reqwest 0.11 / hyper 0.14）來自 serenity 0.12.4 內部，且 **poise 0.6 的 `default` feature 會強制啟用 `serenity/rustls_backend`**。經使用者確認後改採升級路線：serenity `0.12`→`0.12.5`、poise `0.6.1`→`0.6.2` 並關閉 poise default features（保留 `cache`/`chrono`/`handle_panics`）。serenity 0.12.5 將 reqwest 需求放寬為 `>=0.11.22`，得以與專案的 reqwest 0.12 統一。結果：rustls / reqwest 0.11 / hyper 0.14 / tokio-rustls 等重複依賴全數消除，native-tls + openssl 為唯一 TLS 堆疊。下方 Step 3 的原始指示已被此修訂取代。
+
 **Files:**
 - Delete: `SleepyNeko-Studios-Infra-Root-CA.crt`
 - Modify: `src/main.rs:19-30`
