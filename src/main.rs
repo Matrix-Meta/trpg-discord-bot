@@ -16,19 +16,6 @@ use crate::utils::config::ConfigManager;
 
 #[tokio::main]
 async fn main() -> Result<(), bot::Error> {
-    // 1. 設定自簽憑證環境變數 (支援託管商 CA)
-    // 檢查當前目錄下是否有 CRT 檔案，如果有則設定 SSL_CERT_FILE
-    let cert_path = std::path::Path::new("SleepyNeko-Studios-Infra-Root-CA.crt");
-    if cert_path.exists() {
-        // 只有當環境變數尚未設定時才覆蓋，保留外部設定的彈性
-        if env::var("SSL_CERT_FILE").is_err() {
-            println!("偵測到本地 CA 憑證，設定 SSL_CERT_FILE...");
-            unsafe {
-                env::set_var("SSL_CERT_FILE", cert_path);
-            }
-        }
-    }
-
     if let Err(e) = utils::logger::DiscordLogger::init(Some("bot.log")) {
         eprintln!("日誌初始化失敗: {}", e);
     }
