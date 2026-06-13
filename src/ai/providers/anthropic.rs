@@ -1,7 +1,7 @@
 //! Anthropic 原生 adapter：/v1/messages, x-api-key, anthropic-version。
 use serde_json::{Value, json};
 
-use crate::ai::message::{ChatRequest, Completion, ProviderError, Usage};
+use crate::ai::message::{ChatRequest, Completion, ProviderError, Usage, reject_html};
 
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -44,9 +44,7 @@ pub fn build_body(req: &ChatRequest) -> Value {
 }
 
 pub fn parse_response(text: &str) -> Result<Completion, ProviderError> {
-    if text.starts_with("<!DOCTYPE html") || text.contains("<html") {
-        return Err(ProviderError::HtmlResponse);
-    }
+    reject_html(text)?;
     let v: Value = serde_json::from_str(text).map_err(|e| ProviderError::Parse(e.to_string()))?;
     let blocks = v["content"].as_array().ok_or(ProviderError::Empty)?;
     let mut out = String::new();
@@ -68,6 +66,7 @@ pub fn parse_response(text: &str) -> Result<Completion, ProviderError> {
 }
 
 pub fn parse_models(text: &str) -> Result<Vec<String>, ProviderError> {
+    reject_html(text)?;
     let v: Value = serde_json::from_str(text).map_err(|e| ProviderError::Parse(e.to_string()))?;
     let mut out = Vec::new();
     if let Some(arr) = v["data"].as_array() {

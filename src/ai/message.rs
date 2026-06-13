@@ -78,9 +78,25 @@ pub enum ProviderError {
     Empty,
 }
 
+/// 若回應實為 HTML（通常是 API 端點 URL 錯誤導向錯誤頁），回傳 HtmlResponse。
+/// 各 adapter 的 parse 函式應在解析 JSON 前統一呼叫此守衛。
+pub fn reject_html(text: &str) -> Result<(), ProviderError> {
+    if text.starts_with("<!DOCTYPE html") || text.contains("<html") {
+        return Err(ProviderError::HtmlResponse);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reject_html_detects_html() {
+        assert!(matches!(reject_html("<html></html>"), Err(ProviderError::HtmlResponse)));
+        assert!(matches!(reject_html("<!DOCTYPE html><body>"), Err(ProviderError::HtmlResponse)));
+        assert!(reject_html(r#"{"ok":true}"#).is_ok());
+    }
 
     #[test]
     fn role_strings() {

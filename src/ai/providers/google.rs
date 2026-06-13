@@ -1,7 +1,7 @@
 //! Google Gemini 原生 adapter：generateContent, systemInstruction, key 走 query string。
 use serde_json::{Value, json};
 
-use crate::ai::message::{ChatRequest, Completion, ProviderError, Usage};
+use crate::ai::message::{ChatRequest, Completion, ProviderError, Usage, reject_html};
 
 const DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com";
 
@@ -53,9 +53,7 @@ pub fn build_body(req: &ChatRequest) -> Value {
 }
 
 pub fn parse_response(text: &str) -> Result<Completion, ProviderError> {
-    if text.starts_with("<!DOCTYPE html") || text.contains("<html") {
-        return Err(ProviderError::HtmlResponse);
-    }
+    reject_html(text)?;
     let v: Value = serde_json::from_str(text).map_err(|e| ProviderError::Parse(e.to_string()))?;
     let parts = v["candidates"][0]["content"]["parts"]
         .as_array()
@@ -77,6 +75,7 @@ pub fn parse_response(text: &str) -> Result<Completion, ProviderError> {
 }
 
 pub fn parse_models(text: &str) -> Result<Vec<String>, ProviderError> {
+    reject_html(text)?;
     let v: Value = serde_json::from_str(text).map_err(|e| ProviderError::Parse(e.to_string()))?;
     let mut out = Vec::new();
     if let Some(arr) = v["models"].as_array() {

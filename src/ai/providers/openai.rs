@@ -2,7 +2,7 @@
 use serde_json::{Value, json};
 
 use crate::ai::config::ApiProvider;
-use crate::ai::message::{ChatRequest, Completion, ProviderError, Usage};
+use crate::ai::message::{ChatRequest, Completion, ProviderError, Usage, reject_html};
 
 /// 正規化 chat/completions 端點 URL。
 pub fn chat_url(api_url: &str) -> String {
@@ -62,9 +62,7 @@ pub fn build_body(req: &ChatRequest) -> Value {
 
 /// 解析回應 JSON 為 Completion。
 pub fn parse_response(text: &str) -> Result<Completion, ProviderError> {
-    if text.starts_with("<!DOCTYPE html") || text.contains("<html") {
-        return Err(ProviderError::HtmlResponse);
-    }
+    reject_html(text)?;
     let v: Value = serde_json::from_str(text).map_err(|e| ProviderError::Parse(e.to_string()))?;
     let content = v["choices"][0]["message"]["content"]
         .as_str()
@@ -79,9 +77,7 @@ pub fn parse_response(text: &str) -> Result<Completion, ProviderError> {
 
 /// 解析 models 清單回應。
 pub fn parse_models(text: &str) -> Result<Vec<String>, ProviderError> {
-    if text.starts_with("<!DOCTYPE html") || text.contains("<html") {
-        return Err(ProviderError::HtmlResponse);
-    }
+    reject_html(text)?;
     let v: Value = serde_json::from_str(text).map_err(|e| ProviderError::Parse(e.to_string()))?;
     let mut out = Vec::new();
     if let Some(arr) = v["data"].as_array() {
