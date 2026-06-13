@@ -62,10 +62,8 @@ impl ConfigManager {
 
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         std::thread::spawn(move || {
-            for res in rx {
-                if let Ok(event) = res {
-                    let _ = event_tx.send(event);
-                }
+            for event in rx.into_iter().flatten() {
+                let _ = event_tx.send(event);
             }
         });
 
