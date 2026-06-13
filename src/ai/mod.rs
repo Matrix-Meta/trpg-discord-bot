@@ -1,4 +1,6 @@
 pub mod commands;
-pub mod prompt;
+pub mod config;
+pub mod context;
+pub mod message;
 pub mod providers;
 pub mod service;

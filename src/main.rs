@@ -80,10 +80,6 @@ async fn main() -> Result<(), bot::Error> {
         | serenity::GatewayIntents::MESSAGE_CONTENT
         | serenity::GatewayIntents::GUILD_MESSAGES;
 
-    let api_manager = Arc::new(crate::ai::providers::ApiManager::new(Arc::clone(
-        &shared_config,
-    )));
-    let shared_api_manager = Arc::clone(&api_manager);
     let setup_config = Arc::clone(&shared_config);
 
     let setup_skills_db = skills_db.clone();
@@ -142,18 +138,16 @@ async fn main() -> Result<(), bot::Error> {
         })
         .setup(move |ctx, ready, framework| {
             let config = Arc::clone(&setup_config);
-            let api_manager = Arc::clone(&shared_api_manager);
             let skills_db = setup_skills_db.clone();
             let base_settings_db = setup_base_settings_db.clone();
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
 
-                let ai_service = Arc::new(AiService::new(config.clone(), api_manager.clone()));
+                let ai_service = Arc::new(AiService::new(config.clone()));
 
                 println!("{} 已經上線!", ready.user.name);
                 Ok(BotData {
                     config,
-                    api_manager,
                     ai_service,
                     skills_db,
                     base_settings_db,
@@ -199,7 +193,7 @@ async fn handle_message(ctx: &serenity::Context, msg: &serenity::Message, data: 
     );
 
     // 獲取該伺服器的API配置
-    let api_config = data.api_manager.get_guild_config(guild_id).await;
+    let api_config = data.config.lock().await.get_guild_api_config(guild_id).await;
     log::info!(
         "API Config for guild {}: enabled={}, has_api_key={}, provider={:?}",
         guild_id,

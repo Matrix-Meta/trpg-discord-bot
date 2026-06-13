@@ -1,7 +1,8 @@
-use crate::ai::providers::{
-    ApiConfig, ApiProvider, ChatCompletionRequest, ChatMessage, get_api_key_from_env,
-    get_default_model_for_provider, get_models_list,
+use crate::ai::config::{
+    ApiConfig, ApiProvider, env_var_name, get_api_key_from_env, get_default_model_for_provider,
 };
+use crate::ai::message::{ChatMessage, ChatRequest, Role};
+use crate::ai::providers::{self, determine_provider_from_url};
 use crate::bot::{Context, Error};
 use poise::{ChoiceParameter, CreateReply, serenity_prelude as serenity};
 use std::fs::OpenOptions;
@@ -49,9 +50,6 @@ pub async fn chat(
         }
     };
 
-    let data = ctx.data();
-    let api_manager = &data.api_manager;
-
     match action {
         ApiAction::Add => {
             let api_url = if let Some(url) = api_url {
@@ -70,14 +68,15 @@ pub async fn chat(
                 .clone()
                 .or_else(|| get_api_key_from_env(&test_provider));
 
-            let test_request = ChatCompletionRequest {
+            let test_request = ChatRequest {
                 model: model.clone().unwrap_or_else(|| default_model.clone()),
+                system: None,
                 messages: vec![ChatMessage {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: "測試".to_string(),
                 }],
                 temperature: None,
-                max_tokens: Some(10),
+                max_tokens: 10,
             };
 
             log::info!(
@@ -89,11 +88,11 @@ pub async fn chat(
 
             let call_result = timeout(
                 Duration::from_secs(10),
-                crate::ai::providers::call_llm_api(
+                providers::complete(
+                    &test_provider,
                     &api_url,
                     effective_api_key.as_deref(),
                     &test_request,
-                    &test_provider,
                 ),
             )
             .await;
@@ -112,7 +111,7 @@ pub async fn chat(
                     }
 
                     let mut api_name = api_url.clone();
-                    let all_configs = api_manager.get_guild_configs(guild_id).await;
+                    let all_configs = guild_configs(&ctx, guild_id).await;
                     if all_configs.contains_key(&api_name) {
                         let mut counter = 1;
                         while all_configs.contains_key(&format!("{}{}", api_name, counter)) {
@@ -130,7 +129,13 @@ pub async fn chat(
                         provider: provider.clone(),
                     };
 
-                    api_manager.add_guild_config(guild_id, api_config).await;
+                    ctx.data()
+                        .config
+                        .lock()
+                        .await
+                        .add_guild_api_config(guild_id, api_config)
+                        .await
+                        .ok();
 
                     let feedback_msg = if has_command_key {
                         "API 連線測試成功，已儲存設定（API 金鑰已保存到 .env 文件中）"
@@ -182,7 +187,7 @@ pub async fn chat(
             }
         }
         ApiAction::Remove => {
-            let all_configs = api_manager.get_guild_configs(guild_id).await;
+            let all_configs = guild_configs(&ctx, guild_id).await;
 
             if name.is_none() && all_configs.len() > 1 {
                 let embed = serenity::CreateEmbed::default()
@@ -196,13 +201,18 @@ pub async fn chat(
             let api_name_to_remove = if let Some(ref specified_name) = name {
                 specified_name.clone()
             } else {
-                let active_config = api_manager.get_guild_config(guild_id).await;
+                let active_config = active_config(&ctx, guild_id).await;
                 active_config.name
             };
 
-            let success = api_manager
-                .remove_guild_config(guild_id, &api_name_to_remove)
-                .await;
+            let success = ctx
+                .data()
+                .config
+                .lock()
+                .await
+                .remove_guild_api_config(guild_id, &api_name_to_remove)
+                .await
+                .unwrap_or(false);
 
             if success {
                 let embed = serenity::CreateEmbed::default()
@@ -222,7 +232,7 @@ pub async fn chat(
             }
         }
         ApiAction::Toggle => {
-            let all_configs = api_manager.get_guild_configs(guild_id).await;
+            let all_configs = guild_configs(&ctx, guild_id).await;
 
             if all_configs.is_empty() {
                 let embed = serenity::CreateEmbed::default()
@@ -236,14 +246,20 @@ pub async fn chat(
             let target_name = if let Some(ref specified_name) = name {
                 specified_name.clone()
             } else {
-                let active_config = api_manager.get_guild_config(guild_id).await;
+                let active_config = active_config(&ctx, guild_id).await;
                 active_config.name
             };
 
             if let Some(mut config) = all_configs.get(&target_name).cloned() {
                 let was_enabled = config.enabled;
                 config.enabled = !was_enabled;
-                api_manager.add_guild_config(guild_id, config).await;
+                ctx.data()
+                    .config
+                    .lock()
+                    .await
+                    .add_guild_api_config(guild_id, config)
+                    .await
+                    .ok();
 
                 let status = if !was_enabled {
                     "已啟用"
@@ -267,7 +283,7 @@ pub async fn chat(
             }
         }
         ApiAction::ListModels => {
-            let current_config = api_manager.get_guild_config(guild_id).await;
+            let current_config = active_config(&ctx, guild_id).await;
             let effective_api_key = current_config
                 .api_key
                 .clone()
@@ -284,10 +300,10 @@ pub async fn chat(
 
             let api_key = effective_api_key.as_ref().unwrap();
 
-            match get_models_list(
+            match providers::list_models(
+                &current_config.provider,
                 &current_config.api_url,
                 Some(api_key),
-                &current_config.provider,
             )
             .await
             {
@@ -334,7 +350,7 @@ pub async fn chat(
             }
         }
         ApiAction::List => {
-            let all_configs = api_manager.get_guild_configs(guild_id).await;
+            let all_configs = guild_configs(&ctx, guild_id).await;
 
             let data = ctx.data();
             let config_guard = data.config.lock().await;
@@ -373,7 +389,7 @@ pub async fn chat(
             }
         }
         ApiAction::Switch => {
-            let all_configs = api_manager.get_guild_configs(guild_id).await;
+            let all_configs = guild_configs(&ctx, guild_id).await;
 
             if all_configs.is_empty() {
                 let embed = serenity::CreateEmbed::default()
@@ -386,7 +402,14 @@ pub async fn chat(
 
             if let Some(ref target_name) = name {
                 if all_configs.contains_key(target_name) {
-                    let success = api_manager.set_active_api(guild_id, target_name).await;
+                    let success = ctx
+                        .data()
+                        .config
+                        .lock()
+                        .await
+                        .set_active_api(guild_id, target_name)
+                        .await
+                        .unwrap_or(false);
 
                     if success {
                         let embed = serenity::CreateEmbed::default()
@@ -446,27 +469,21 @@ async fn save_api_key_to_env(provider: &ApiProvider, key: &str) {
         String::new()
     };
 
-    let env_var_name = match provider {
-        ApiProvider::OpenAI => "OPENAI_API_KEY",
-        ApiProvider::OpenRouter => "OPENROUTER_API_KEY",
-        ApiProvider::Anthropic => "ANTHROPIC_API_KEY",
-        ApiProvider::Google => "GOOGLE_API_KEY",
-        ApiProvider::Custom => "CUSTOM_API_KEY",
-    };
+    let var = env_var_name(provider);
 
     let mut lines: Vec<String> = env_content.lines().map(|s| s.to_string()).collect();
     let mut found = false;
 
     for line in &mut lines {
-        if line.starts_with(&format!("{}=", env_var_name)) {
-            *line = format!("{}={}", env_var_name, key);
+        if line.starts_with(&format!("{}=", var)) {
+            *line = format!("{}={}", var, key);
             found = true;
             break;
         }
     }
 
     if !found {
-        lines.push(format!("{}={}", env_var_name, key));
+        lines.push(format!("{}={}", var, key));
     }
 
     if let Ok(mut file) = OpenOptions::new()
@@ -480,16 +497,23 @@ async fn save_api_key_to_env(provider: &ApiProvider, key: &str) {
     }
 }
 
-fn determine_provider_from_url(url: &str) -> ApiProvider {
-    if url.contains("openrouter.ai") {
-        ApiProvider::OpenRouter
-    } else if url.contains("anthropic") {
-        ApiProvider::Anthropic
-    } else if url.contains("google") || url.contains("gemini") {
-        ApiProvider::Google
-    } else if url.contains("openai.com") {
-        ApiProvider::OpenAI
-    } else {
-        ApiProvider::Custom
-    }
+async fn guild_configs(
+    ctx: &Context<'_>,
+    guild_id: u64,
+) -> std::collections::HashMap<String, ApiConfig> {
+    ctx.data()
+        .config
+        .lock()
+        .await
+        .get_guild_api_configs(guild_id)
+        .await
+}
+
+async fn active_config(ctx: &Context<'_>, guild_id: u64) -> ApiConfig {
+    ctx.data()
+        .config
+        .lock()
+        .await
+        .get_guild_api_config(guild_id)
+        .await
 }
