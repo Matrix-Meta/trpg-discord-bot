@@ -12,7 +12,7 @@ use poise::{
 #[poise::command(slash_command)]
 pub async fn help(ctx: Context<'_>) -> Result<(), Error> {
     log::info!("執行 help 指令 for guild {:?}", ctx.guild_id());
-    
+
     let embed = serenity::CreateEmbed::default()
         .title("TRPG Discord Bot 指令說明")
         .description(

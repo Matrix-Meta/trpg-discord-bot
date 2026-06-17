@@ -26,6 +26,9 @@ target
 # Qwen Code related files
 QWEN.md
 
+# 開發文件（規格／實作計畫，本地保留不入庫）
+docs/
+
 # Local environment and runtime artifacts
 .env
 config.json

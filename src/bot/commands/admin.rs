@@ -38,13 +38,18 @@ pub async fn admin(
     #[description = "管理操作"] action: AdminAction,
     #[description = "要添加或移除的開發者"] user: Option<serenity::User>,
 ) -> Result<(), Error> {
-    log::info!("執行管理指令: {:?} for user {:?}, guild {:?}", action, ctx.author().id, ctx.guild_id());
-    
+    log::info!(
+        "執行管理指令: {:?} for user {:?}, guild {:?}",
+        action,
+        ctx.author().id,
+        ctx.guild_id()
+    );
+
     let caller_id = ctx.author().id.get();
 
     let has_permission = {
         let config_manager = ctx.data().config.lock().await;
-        futures::executor::block_on(config_manager.is_developer(caller_id))
+        config_manager.is_developer(caller_id).await
     };
 
     if !has_permission {
@@ -104,7 +109,7 @@ pub async fn admin(
             }
 
             let config_manager = ctx.data().config.lock().await;
-            match futures::executor::block_on(config_manager.add_developer(user.id.get())) {
+            match config_manager.add_developer(user.id.get()).await {
                 Ok(success) => {
                     if success {
                         log::info!("用戶 {:?} 已添加到開發者列表", user.id);
@@ -138,7 +143,7 @@ pub async fn admin(
             }
 
             let config_manager = ctx.data().config.lock().await;
-            match futures::executor::block_on(config_manager.remove_developer(user.id.get())) {
+            match config_manager.remove_developer(user.id.get()).await {
                 Ok(success) => {
                     if success {
                         log::info!("用戶 {:?} 已從開發者列表移除", user.id);

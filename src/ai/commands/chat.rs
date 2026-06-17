@@ -1,5 +1,9 @@
+use crate::ai::config::{
+    ApiConfig, ApiProvider, env_var_name, get_api_key_from_env, get_default_model_for_provider,
+};
+use crate::ai::message::{ChatMessage, ChatRequest, Role};
+use crate::ai::providers::{self, determine_provider_from_url};
 use crate::bot::{Context, Error};
-use crate::utils::api::{ApiConfig, ApiProvider, ChatCompletionRequest, ChatMessage};
 use poise::{ChoiceParameter, CreateReply, serenity_prelude as serenity};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -46,9 +50,6 @@ pub async fn chat(
         }
     };
 
-    let data = ctx.data();
-    let api_manager = &data.api_manager;
-
     match action {
         ApiAction::Add => {
             let api_url = if let Some(url) = api_url {
@@ -62,26 +63,22 @@ pub async fn chat(
             };
 
             let test_provider = determine_provider_from_url(&api_url);
-            // 選擇適合提供者的默認模型
-            let default_model = crate::utils::api::get_default_model_for_provider(&test_provider);
-
-            // 優先使用傳入的 API 金鑰，如果沒有則嘗試從環境變數獲取
+            let default_model = get_default_model_for_provider(&test_provider);
             let effective_api_key = api_key
                 .clone()
-                .or_else(|| crate::utils::api::get_api_key_from_env(&test_provider));
+                .or_else(|| get_api_key_from_env(&test_provider));
 
-            // 驗證 API 連線
-            let test_request = ChatCompletionRequest {
+            let test_request = ChatRequest {
                 model: model.clone().unwrap_or_else(|| default_model.clone()),
+                system: None,
                 messages: vec![ChatMessage {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: "測試".to_string(),
                 }],
                 temperature: None,
-                max_tokens: Some(10),
+                max_tokens: 10,
             };
 
-            // 記錄 API 測試參數，方便調試
             log::info!(
                 "API 測試: URL={} Model={} Key(Present)={}",
                 api_url,
@@ -91,37 +88,30 @@ pub async fn chat(
 
             let call_result = timeout(
                 Duration::from_secs(10),
-                crate::utils::api::call_llm_api(
+                providers::complete(
+                    &test_provider,
                     &api_url,
                     effective_api_key.as_deref(),
                     &test_request,
-                    &test_provider,
                 ),
             )
             .await;
 
             match call_result {
                 Ok(Ok(_)) => {
-                    // API 連線成功
                     let provider = determine_provider_from_url(&api_url);
-                    // 使用測試成功的模型或根據提供者選擇默認模型
-                    let selected_model = model.unwrap_or_else(|| {
-                        crate::utils::api::get_default_model_for_provider(&provider)
-                    });
+                    let selected_model =
+                        model.unwrap_or_else(|| get_default_model_for_provider(&provider));
 
-                    // 檢查是否有通過命令提供金鑰，以及環境變數中是否有金鑰
                     let has_command_key = api_key.is_some();
-                    let has_env_key = crate::utils::api::get_api_key_from_env(&provider).is_some();
+                    let has_env_key = get_api_key_from_env(&provider).is_some();
 
-                    // 如果通過命令提供了金鑰，則將其保存到 .env 文件中
                     if let Some(ref key) = api_key {
                         save_api_key_to_env(&provider, key).await;
                     }
 
-                    // 儲存到設定檔時，不保存金鑰（只保存 None，表示使用環境變數）
-                    // 預設使用API URL作為名稱，如果有重複則添加序號
                     let mut api_name = api_url.clone();
-                    let all_configs = api_manager.get_guild_configs(guild_id).await;
+                    let all_configs = guild_configs(&ctx, guild_id).await;
                     if all_configs.contains_key(&api_name) {
                         let mut counter = 1;
                         while all_configs.contains_key(&format!("{}{}", api_name, counter)) {
@@ -133,15 +123,20 @@ pub async fn chat(
                     let api_config = ApiConfig {
                         name: api_name,
                         api_url,
-                        api_key: None, // 不再保存金鑰到設定檔中
+                        api_key: None,
                         model: selected_model,
                         enabled: true,
-                        provider: provider.clone(), // Clone to avoid move
+                        provider: provider.clone(),
                     };
 
-                    api_manager.add_guild_config(guild_id, api_config).await;
+                    ctx.data()
+                        .config
+                        .lock()
+                        .await
+                        .add_guild_api_config(guild_id, api_config)
+                        .await
+                        .ok();
 
-                    // 提供適當的反饋信息
                     let feedback_msg = if has_command_key {
                         "API 連線測試成功，已儲存設定（API 金鑰已保存到 .env 文件中）"
                     } else if has_env_key {
@@ -157,13 +152,11 @@ pub async fn chat(
                     ctx.send(CreateReply::default().embed(embed)).await?;
                 }
                 Ok(Err(e)) => {
-                    // 選擇正確的模型名稱用於日誌
                     let log_model = model.clone().unwrap_or_else(|| {
                         let provider = determine_provider_from_url(&api_url);
-                        crate::utils::api::get_default_model_for_provider(&provider)
+                        get_default_model_for_provider(&provider)
                     });
 
-                    // 記錄詳細錯誤信息
                     log::error!(
                         "API 測試失敗: URL={}, Model={}, Error={}",
                         api_url,
@@ -178,10 +171,9 @@ pub async fn chat(
                     ctx.send(CreateReply::default().embed(embed)).await?;
                 }
                 Err(_) => {
-                    // 選擇正確的模型名稱用於日誌
                     let log_model = model.clone().unwrap_or_else(|| {
                         let provider = determine_provider_from_url(&api_url);
-                        crate::utils::api::get_default_model_for_provider(&provider)
+                        get_default_model_for_provider(&provider)
                     });
 
                     log::warn!("API 測試超時: URL={}, Model={}", api_url, log_model);
@@ -195,9 +187,8 @@ pub async fn chat(
             }
         }
         ApiAction::Remove => {
-            let all_configs = api_manager.get_guild_configs(guild_id).await;
+            let all_configs = guild_configs(&ctx, guild_id).await;
 
-            // 如果沒有指定要刪除的名稱，且有多個配置，則提示用戶指定名稱
             if name.is_none() && all_configs.len() > 1 {
                 let embed = serenity::CreateEmbed::default()
                     .title("多個API設定")
@@ -210,14 +201,18 @@ pub async fn chat(
             let api_name_to_remove = if let Some(ref specified_name) = name {
                 specified_name.clone()
             } else {
-                // 如果只有一個配置，使用活動API名稱
-                let active_config = api_manager.get_guild_config(guild_id).await;
+                let active_config = active_config(&ctx, guild_id).await;
                 active_config.name
             };
 
-            let success = api_manager
-                .remove_guild_config(guild_id, &api_name_to_remove)
-                .await;
+            let success = ctx
+                .data()
+                .config
+                .lock()
+                .await
+                .remove_guild_api_config(guild_id, &api_name_to_remove)
+                .await
+                .unwrap_or(false);
 
             if success {
                 let embed = serenity::CreateEmbed::default()
@@ -237,7 +232,7 @@ pub async fn chat(
             }
         }
         ApiAction::Toggle => {
-            let all_configs = api_manager.get_guild_configs(guild_id).await;
+            let all_configs = guild_configs(&ctx, guild_id).await;
 
             if all_configs.is_empty() {
                 let embed = serenity::CreateEmbed::default()
@@ -248,21 +243,23 @@ pub async fn chat(
                 return Ok(());
             }
 
-            // 如果沒有指定要切換的名稱，則使用活動API配置
             let target_name = if let Some(ref specified_name) = name {
                 specified_name.clone()
             } else {
-                // 使用活動API配置
-                let active_config = api_manager.get_guild_config(guild_id).await;
+                let active_config = active_config(&ctx, guild_id).await;
                 active_config.name
             };
 
             if let Some(mut config) = all_configs.get(&target_name).cloned() {
                 let was_enabled = config.enabled;
                 config.enabled = !was_enabled;
-
-                // 將更新後的配置重新添加到存儲
-                api_manager.add_guild_config(guild_id, config).await;
+                ctx.data()
+                    .config
+                    .lock()
+                    .await
+                    .add_guild_api_config(guild_id, config)
+                    .await
+                    .ok();
 
                 let status = if !was_enabled {
                     "已啟用"
@@ -286,14 +283,11 @@ pub async fn chat(
             }
         }
         ApiAction::ListModels => {
-            // 獲取當前伺服器的配置
-            let current_config = api_manager.get_guild_config(guild_id).await;
-
-            // 檢查是否有環境變數中的API金鑰
+            let current_config = active_config(&ctx, guild_id).await;
             let effective_api_key = current_config
                 .api_key
                 .clone()
-                .or_else(|| crate::utils::api::get_api_key_from_env(&current_config.provider));
+                .or_else(|| get_api_key_from_env(&current_config.provider));
 
             if effective_api_key.is_none() {
                 let embed = serenity::CreateEmbed::default()
@@ -304,18 +298,17 @@ pub async fn chat(
                 return Ok(());
             }
 
-            let api_key = effective_api_key.as_ref().unwrap(); // 已確認不為 None
+            let api_key = effective_api_key.as_ref().unwrap();
 
-            match crate::utils::api::get_models_list(
+            match providers::list_models(
+                &current_config.provider,
                 &current_config.api_url,
                 Some(api_key),
-                &current_config.provider,
             )
             .await
             {
                 Ok(models_list) => {
                     if !models_list.is_empty() {
-                        // 限制模型顯示數量，避免 Discord 消息長度限制
                         let models_to_show = if models_list.len() > 50 {
                             format!("顯示前 50 個模型（共 {} 個）：\n", models_list.len())
                         } else {
@@ -324,7 +317,7 @@ pub async fn chat(
 
                         let models_str = models_list
                             .iter()
-                            .take(50) // 限制顯示前 50 個模型
+                            .take(50)
                             .map(|model| format!("- {}", model))
                             .collect::<Vec<_>>()
                             .join("\n");
@@ -345,7 +338,6 @@ pub async fn chat(
                     }
                 }
                 Err(_) => {
-                    // 如果獲取模型列表失敗，顯示當前配置的模型
                     let embed = serenity::CreateEmbed::default()
                         .title("可用模型")
                         .description(format!(
@@ -358,10 +350,8 @@ pub async fn chat(
             }
         }
         ApiAction::List => {
-            // 獲取當前伺服器的所有API配置
-            let all_configs = api_manager.get_guild_configs(guild_id).await;
+            let all_configs = guild_configs(&ctx, guild_id).await;
 
-            // 獲取活動API配置名稱
             let data = ctx.data();
             let config_guard = data.config.lock().await;
             let guilds_read = config_guard.guilds.read().await;
@@ -370,8 +360,8 @@ pub async fn chat(
             } else {
                 String::new()
             };
-            drop(guilds_read); // 釋放對guilds的借用
-            drop(config_guard); // 釋放對config的鎖
+            drop(guilds_read);
+            drop(config_guard);
 
             if all_configs.is_empty() {
                 let embed = serenity::CreateEmbed::default()
@@ -399,7 +389,7 @@ pub async fn chat(
             }
         }
         ApiAction::Switch => {
-            let all_configs = api_manager.get_guild_configs(guild_id).await;
+            let all_configs = guild_configs(&ctx, guild_id).await;
 
             if all_configs.is_empty() {
                 let embed = serenity::CreateEmbed::default()
@@ -412,8 +402,14 @@ pub async fn chat(
 
             if let Some(ref target_name) = name {
                 if all_configs.contains_key(target_name) {
-                    // 切換到指定的API配置
-                    let success = api_manager.set_active_api(guild_id, target_name).await;
+                    let success = ctx
+                        .data()
+                        .config
+                        .lock()
+                        .await
+                        .set_active_api(guild_id, target_name)
+                        .await
+                        .unwrap_or(false);
 
                     if success {
                         let embed = serenity::CreateEmbed::default()
@@ -439,7 +435,6 @@ pub async fn chat(
                     ctx.send(CreateReply::default().embed(embed)).await?;
                 }
             } else {
-                // 顯示可用的配置列表，讓用戶知道可以選擇什麼
                 let mut description = String::new();
                 for (name, config) in &all_configs {
                     let status = if config.enabled { "✅" } else { "❌" };
@@ -465,44 +460,32 @@ pub async fn chat(
     Ok(())
 }
 
-/// 將API金鑰保存到 .env 文件中
 async fn save_api_key_to_env(provider: &ApiProvider, key: &str) {
     let env_path = Path::new(".env");
 
-    // 讀取現有的 .env 內容
     let env_content = if env_path.exists() {
         std::fs::read_to_string(env_path).unwrap_or_default()
     } else {
         String::new()
     };
 
-    // 確定要寫入的環境變數名稱
-    let env_var_name = match provider {
-        ApiProvider::OpenAI => "OPENAI_API_KEY",
-        ApiProvider::OpenRouter => "OPENROUTER_API_KEY",
-        ApiProvider::Anthropic => "ANTHROPIC_API_KEY",
-        ApiProvider::Google => "GOOGLE_API_KEY",
-        ApiProvider::Custom => "CUSTOM_API_KEY",
-    };
+    let var = env_var_name(provider);
 
-    // 檢查環境變數是否已經存在
     let mut lines: Vec<String> = env_content.lines().map(|s| s.to_string()).collect();
     let mut found = false;
 
     for line in &mut lines {
-        if line.starts_with(&format!("{}=", env_var_name)) {
-            *line = format!("{}={}", env_var_name, key);
+        if line.starts_with(&format!("{}=", var)) {
+            *line = format!("{}={}", var, key);
             found = true;
             break;
         }
     }
 
-    // 如果環境變數不存在，則添加新行
     if !found {
-        lines.push(format!("{}={}", env_var_name, key));
+        lines.push(format!("{}={}", var, key));
     }
 
-    // 寫回 .env 文件
     if let Ok(mut file) = OpenOptions::new()
         .write(true)
         .create(true)
@@ -514,14 +497,23 @@ async fn save_api_key_to_env(provider: &ApiProvider, key: &str) {
     }
 }
 
-fn determine_provider_from_url(url: &str) -> ApiProvider {
-    if url.contains("openrouter.ai") {
-        ApiProvider::OpenRouter
-    } else if url.contains("anthropic") {
-        ApiProvider::Anthropic
-    } else if url.contains("google") {
-        ApiProvider::Google
-    } else {
-        ApiProvider::OpenAI // Default to OpenAI for compatibility
-    }
+async fn guild_configs(
+    ctx: &Context<'_>,
+    guild_id: u64,
+) -> std::collections::HashMap<String, ApiConfig> {
+    ctx.data()
+        .config
+        .lock()
+        .await
+        .get_guild_api_configs(guild_id)
+        .await
+}
+
+async fn active_config(ctx: &Context<'_>, guild_id: u64) -> ApiConfig {
+    ctx.data()
+        .config
+        .lock()
+        .await
+        .get_guild_api_config(guild_id)
+        .await
 }

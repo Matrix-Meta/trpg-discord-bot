@@ -310,12 +310,13 @@ pub async fn skill(
                 let ctx_clone = ctx.serenity_context().clone();
                 let author_id = ctx.author().id;
 
-                // 持續處理按鈕點擊，直到發生錯誤或明確退出
-                while let Some(interaction) = message
+                let mut next_interaction = message
                     .await_component_interaction(&ctx_clone)
                     .author_id(author_id)
-                    .await
-                {
+                    .timeout(Duration::from_secs(120))
+                    .await;
+
+                while let Some(interaction) = next_interaction {
                     // 檢查是否為技能選擇按鈕
                     if let Some(skill_index_str) = interaction
                         .data
@@ -364,7 +365,12 @@ pub async fn skill(
                                     )
                                     .await?;
 
-                                continue; // 繼續循環
+                                next_interaction = message
+                                    .await_component_interaction(&ctx_clone)
+                                    .author_id(author_id)
+                                    .timeout(Duration::from_secs(120))
+                                    .await;
+                                continue;
                             }
                         }
                     }
@@ -391,7 +397,12 @@ pub async fn skill(
                             .await?;
 
                         message = *interaction.message.clone();
-                        continue; // 繼續循環
+                        next_interaction = message
+                            .await_component_interaction(&ctx_clone)
+                            .author_id(author_id)
+                            .timeout(Duration::from_secs(120))
+                            .await;
+                        continue;
                     }
 
                     // 檢查是否為上一頁按鈕
@@ -414,11 +425,36 @@ pub async fn skill(
                             .await?;
 
                         message = *interaction.message.clone();
-                        continue; // 繼續循環
+                        next_interaction = message
+                            .await_component_interaction(&ctx_clone)
+                            .author_id(author_id)
+                            .timeout(Duration::from_secs(120))
+                            .await;
+                        continue;
                     }
 
-                    // 重置消息以繼續接收交互
-                    message = message.clone();
+                    next_interaction = message
+                        .await_component_interaction(&ctx_clone)
+                        .author_id(author_id)
+                        .timeout(Duration::from_secs(120))
+                        .await;
+                }
+
+                if next_interaction.is_none() {
+                    let _ = message
+                        .edit(
+                            &ctx_clone.http,
+                            serenity::EditMessage::new().components(vec![]),
+                        )
+                        .await;
+                    let _ = message
+                        .channel_id
+                        .send_message(
+                            &ctx_clone.http,
+                            serenity::CreateMessage::default()
+                                .content("操作逾時，請重新執行指令。"),
+                        )
+                        .await;
                 }
             }
         }

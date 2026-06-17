@@ -2,23 +2,60 @@ use crate::bot::{Context, Error};
 use crate::models::types::RollResult;
 use crate::utils::coc::{determine_success_level, format_success_level, roll_coc_multi};
 use crate::utils::dice::roll_multiple_dice;
-use poise::{CreateReply, serenity_prelude as serenity};
+use poise::{ChoiceParameter, CreateReply, serenity_prelude as serenity};
 use serenity::model::prelude::Mentionable;
 
-/// D&D 骰子指令 - 擲骰子
+#[derive(ChoiceParameter, Clone, Copy, Debug)]
+pub enum DiceMode {
+    #[name = "dnd"]
+    Dnd,
+    #[name = "coc"]
+    Coc,
+}
+
+/// 擲骰子指令 - 支援 D&D 和 CoC 7e
 #[poise::command(slash_command)]
-pub async fn roll(
+pub async fn dice(
     ctx: Context<'_>,
-    #[description = "骰子表達式 (例如: 2d20+5, d10, 1d6>=15)"] expression: String,
+    #[description = "骰子模式 (dnd 或 coc)"] mode: DiceMode,
+    #[description = "D&D: 骰子表達式 (例如: 2d20+5) / CoC: 技能值 (1-100)"] value: String,
+    #[description = "CoC 模式: 擲骰次數 (1-100)"]
+    #[min = 1]
+    #[max = 100]
+    times: Option<u8>,
+    #[description = "附註/描述 (選填)"] description: Option<String>,
 ) -> Result<(), Error> {
-    log::info!("執行 D&D 擲骰: {} for guild {:?}", expression, ctx.guild_id());
-    
+    match mode {
+        DiceMode::Dnd => roll_dnd(ctx, value, description).await,
+        DiceMode::Coc => {
+            let skill = value
+                .parse::<u8>()
+                .map_err(|_| anyhow::anyhow!("CoC 模式需要輸入 1-100 的技能值"))?;
+            if !(1..=100).contains(&skill) {
+                return Err(anyhow::anyhow!("技能值必須在 1-100 之間"));
+            }
+            roll_coc_impl(ctx, skill, times, description).await
+        }
+    }
+}
+
+async fn roll_dnd(
+    ctx: Context<'_>,
+    expression: String,
+    description: Option<String>,
+) -> Result<(), Error> {
+    log::info!(
+        "執行 D&D 擲骰: {} for guild {:?}",
+        expression,
+        ctx.guild_id()
+    );
+
     let rules = {
         let data = ctx.data();
         let config_handle = data.config.lock().await;
         let guild_id = ctx.guild_id().map(|id| id.get());
         let guild_config = if let Some(id) = guild_id {
-            futures::executor::block_on(config_handle.get_guild_config(id))
+            config_handle.get_guild_config(id).await
         } else {
             Default::default()
         };
@@ -36,14 +73,15 @@ pub async fn roll(
             };
 
             if results.len() == 1 {
-                send_embed(&ctx, "D&D 擲骰結果", format_roll_result(&results[0])).await?;
+                let content =
+                    with_user_note(format_roll_result(&results[0]), description.as_deref());
+                send_embed(&ctx, "D&D 擲骰結果", content).await?;
             } else {
-                send_embed(
-                    &ctx,
-                    "D&D 連續擲骰結果",
+                let content = with_user_note(
                     format_multiple_roll_results(&results),
-                )
-                .await?;
+                    description.as_deref(),
+                );
+                send_embed(&ctx, "D&D 連續擲骰結果", content).await?;
             }
 
             if let Some(guild_id) = guild_id {
@@ -59,21 +97,14 @@ pub async fn roll(
     Ok(())
 }
 
-/// CoC 7e 指令
-#[poise::command(slash_command)]
-pub async fn coc(
+async fn roll_coc_impl(
     ctx: Context<'_>,
-    #[description = "技能值 (1-100)"]
-    #[min = 1]
-    #[max = 100]
     skill: u8,
-    #[description = "擲骰次數 (1-10)"]
-    #[min = 1]
-    #[max = 10]
     times: Option<u8>,
+    description: Option<String>,
 ) -> Result<(), Error> {
     log::info!("執行 CoC 擲骰: 技能值={}, 次數={:?}", skill, times);
-    
+
     let guild_id = match ctx.guild_id() {
         Some(id) => id.get(),
         None => {
@@ -85,7 +116,7 @@ pub async fn coc(
     let rules = {
         let data = ctx.data();
         let config_handle = data.config.lock().await;
-        futures::executor::block_on(config_handle.get_guild_config(guild_id)).coc_rules
+        config_handle.get_guild_config(guild_id).await.coc_rules
     };
 
     let times = times.unwrap_or(1);
@@ -102,9 +133,7 @@ pub async fn coc(
         let result = &results[0];
         let success_level = determine_success_level(result.total as u16, skill, &rules);
         let success_text = format_success_level(success_level);
-        send_embed(
-            &ctx,
-            "CoC 7e 擲骰結果",
+        let content = with_user_note(
             format!(
                 "技能值: {}\n骰子結果: {}\n判定結果: {}{}",
                 skill,
@@ -118,10 +147,35 @@ pub async fn coc(
                     ""
                 }
             ),
-        )
-        .await?;
+            description.as_deref(),
+        );
+        send_embed(&ctx, "CoC 7e 擲骰結果", content).await?;
     } else {
-        let mut message = format!("連續擲骰次數: {}\n技能值: {}\n", results.len(), skill);
+        // 多次擲骰：顯示統計摘要 + 完整列表
+        let total_count = results.len();
+        let success_count = results
+            .iter()
+            .filter(|r| {
+                let level = determine_success_level(r.total as u16, skill, &rules);
+                level <= 4 // 成功等級 1-4: 大成功、極限成功、困難成功、普通成功
+            })
+            .count();
+        let crit_success_count = results.iter().filter(|r| r.is_critical_success).count();
+        let crit_fail_count = results.iter().filter(|r| r.is_critical_fail).count();
+
+        let mut message = format!(
+            "連續擲骰次數: {}\n技能值: {}\n\n📊 統計摘要\n成功: {}/{} ({:.1}%)\n大成功: {} | 大失敗: {}\n\n",
+            total_count,
+            skill,
+            success_count,
+            total_count,
+            (success_count as f64 / total_count as f64) * 100.0,
+            crit_success_count,
+            crit_fail_count
+        );
+
+        // 完整結果列表
+        message.push_str("📋 詳細結果\n");
         for (index, result) in results.iter().enumerate() {
             let success_level = determine_success_level(result.total as u16, skill, &rules);
             let success_text = format_success_level(success_level);
@@ -145,8 +199,17 @@ pub async fn coc(
                 crit,
                 status
             ));
+
+            // Discord embed 限制 4096 字元，如果超過則分批發送
+            if message.len() > 3800 && index < results.len() - 1 {
+                let content = format!("{}\n(續...)", message);
+                send_embed(&ctx, "CoC 7e 連續擲骰結果 (部分)", content).await?;
+                message.clear();
+                message.push_str(&format!("(接續 {} - {})\n", index + 2, results.len()));
+            }
         }
-        send_embed(&ctx, "CoC 7e 連續擲骰結果", message).await?;
+        let content = with_user_note(message, description.as_deref());
+        send_embed(&ctx, "CoC 7e 連續擲骰結果", content).await?;
     }
 
     if let Some(guild_id) = guild_id {
@@ -216,6 +279,13 @@ fn format_multiple_roll_results(results: &[RollResult]) -> String {
     }
 
     output
+}
+
+fn with_user_note(base: String, note: Option<&str>) -> String {
+    match note {
+        Some(text) if !text.trim().is_empty() => format!("{}\n——\n📝 註: {}", base, text.trim()),
+        _ => base,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -323,7 +393,7 @@ async fn log_critical_events(
     let (success_channel, fail_channel) = {
         let data = ctx.data();
         let manager = data.config.lock().await;
-        let cfg = futures::executor::block_on(manager.get_guild_config(guild_id.get()));
+        let cfg = manager.get_guild_config(guild_id.get()).await;
         (cfg.crit_success_channel, cfg.crit_fail_channel)
     };
 

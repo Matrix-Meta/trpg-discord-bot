@@ -10,7 +10,8 @@ deprecated = "allow"
 [dependencies]
 anyhow = "1"
 dotenvy = "0.15.7"
-poise = "0.6.1"
+# 關閉 poise default features 以排除 serenity/rustls_backend，改走 native-tls
+poise = { version = "0.6.2", default-features = false, features = ["cache", "chrono", "handle_panics"] }
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "process"] }
 
 # 只保留一組 serde / serde_json
@@ -36,8 +37,11 @@ futures = "0.3"
 csv = "1.4"
 calamine = "0.31"   # 讀 Excel，配合 2024 edition 沒問題
 
-# HTTP 用 rustls，避免 Linux 上 OpenSSL 依賴雜訊；也打開常見解壓功能
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json", "gzip", "brotli", "deflate", "zstd"] }
+# HTTP 用 native-tls 以支援自簽憑證環境變數
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "http2", "json", "gzip", "brotli", "deflate", "zstd"] }
+
+# 顯式指定 serenity 使用 native-tls
+serenity = { version = "0.12.5", default-features = false, features = ["native_tls_backend", "client", "gateway"] }
 
 # UUID 生成
 uuid = { version = "1.0", features = ["v4"] }
@@ -45,12 +49,4 @@ uuid = { version = "1.0", features = ["v4"] }
 # 日期時間處理
 chrono = { version = "0.4", features = ["serde"] }
 
-# 數學計算庫（用於計算向量相似度）
-ndarray = "0.15"
 
-# 序列化庫（用於安全的向量序列化/反序列化）
-bincode = "1.3"
-base64 = "0.22"
-
-# SQLite 相關
-rusqlite = { version = "0.32", features = ["bundled"] }

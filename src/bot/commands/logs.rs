@@ -24,6 +24,9 @@ pub async fn crit(
         ctx.guild_id()
     );
 
+    // 延遲回應以避免超時
+    ctx.defer().await?;
+
     let guild_id = match ctx.guild_id() {
         Some(id) => id.get(),
         None => {
@@ -35,8 +38,11 @@ pub async fn crit(
         }
     };
 
-    let manager = ctx.data().config.lock().await;
-    let mut guild_config = futures::executor::block_on(manager.get_guild_config(guild_id));
+    // 先獲取配置
+    let mut guild_config = {
+        let manager = ctx.data().config.lock().await;
+        manager.get_guild_config(guild_id).await
+    };
 
     let (label, field) = match kind {
         CritChannelKind::Success => ("大成功", &mut guild_config.crit_success_channel),
@@ -45,9 +51,14 @@ pub async fn crit(
 
     *field = channel.map(|ch| ch.get());
 
-    match futures::executor::block_on(manager.set_guild_config(guild_id, guild_config)) {
+    // 再保存配置
+    let result = {
+        let manager = ctx.data().config.lock().await;
+        manager.set_guild_config(guild_id, guild_config).await
+    };
+
+    match result {
         Ok(_) => {
-            drop(manager);
             let description = match channel {
                 Some(ch) => format!("已設定{}紀錄頻道為 <#{}>", label, ch),
                 None => format!("已清除{}紀錄頻道設定", label),
@@ -63,6 +74,12 @@ pub async fn crit(
         }
         Err(e) => {
             log::error!("設定 crit 頻道失敗: {:?}", e);
+
+            let embed = serenity::CreateEmbed::default()
+                .title("設定失敗")
+                .description(format!("無法更新設定: {}", e))
+                .colour(serenity::Colour::RED);
+            ctx.send(CreateReply::default().embed(embed)).await?;
             return Err(e.into());
         }
     }
